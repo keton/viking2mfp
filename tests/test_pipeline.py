@@ -507,6 +507,74 @@ def main() -> int:
     check("Zen session-store cookies are readable per host",
           zen_session_cookies_are_readable)
 
+    def login_is_detected_per_site():
+        import argparse
+        import pathlib
+        import tempfile
+
+        sys.path.insert(0, str(SCRIPT.parent))
+        import viking_to_mfp as v
+
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="kv2mfp-sess-"))
+        kv_cache = tmp / "kv.json"
+        mfp_cache = tmp / "mfp.json"
+        v.save_cached_cookies(mfp_cache, [v.CookieRecord(
+            "__Secure-next-auth.session-token", "good", "www.myfitnesspal.com")])
+
+        kv_recipe = v.SessionRecipe("kv", "https://panel.kuchniavikinga.pl/",
+                                    ("kuchniavikinga.pl",), kv_cache, "KV_COOKIE", "panel login")
+        mfp_recipe = v.SessionRecipe("mfp", "https://www.myfitnesspal.com/account/login",
+                                     ("myfitnesspal.com",), mfp_cache, "MFP_COOKIE", "mfp login")
+        args = argparse.Namespace(cookie={}, relogin=False, login_timeout=0, login_poll=0)
+
+        opened = []
+        real_open, real_harvest, real_dump = (
+            v.webbrowser.open, v.harvest_cookies, v.dump_cookies)
+        v.webbrowser.open = lambda url: (opened.append(url), True)[1]
+        v.dump_cookies = lambda *a, **k: None
+        try:
+            # 1. nothing cached, but the browser is already logged in: adopt it
+            #    silently instead of opening a tab the user does not need
+            v.harvest_cookies = lambda *a, **k: [
+                v.CookieRecord("SESSION", "live", "panel.kuchniavikinga.pl")]
+            session = v.ensure_session(kv_recipe, args, lambda c: None, "KV")
+            assert session.source == "browser", session.source
+            assert opened == [], f"opened a login tab unnecessarily: {opened}"
+
+            # 2. a stale cached session must be detected and refreshed
+            v.save_cached_cookies(kv_cache,
+                                  [v.CookieRecord("SESSION", "stale", "panel.kuchniavikinga.pl")])
+            opened.clear()
+            v.harvest_cookies = lambda *a, **k: []
+            try:
+                v.ensure_session(kv_recipe, args, lambda c: "not valid", "KV")
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("a stale session must not be accepted")
+            assert opened == ["https://panel.kuchniavikinga.pl/"], opened
+
+            # 3. ...but a stale Kuchnia Vikinga session must not drag MyFitnessPal
+            #    back through a login it does not need
+            opened.clear()
+            session = v.ensure_session(mfp_recipe, args, lambda c: None, "MFP")
+            assert session.source.startswith("cache"), session.source
+            assert opened == [], f"MFP sent back to login needlessly: {opened}"
+
+            # 4. nothing cached and no browser session -> MFP must ask for a login
+            opened.clear()
+            mfp_cache.unlink()
+            try:
+                v.ensure_session(mfp_recipe, args, lambda c: "not valid", "MFP")
+            except SystemExit:
+                pass
+            assert opened == ["https://www.myfitnesspal.com/account/login"], opened
+        finally:
+            v.webbrowser.open, v.harvest_cookies, v.dump_cookies = (
+                real_open, real_harvest, real_dump)
+
+    check("login need is detected per site", login_is_detected_per_site)
+
     if failures:
         print(f"\n{len(failures)} check(s) failed")
         return 1

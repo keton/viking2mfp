@@ -858,6 +858,7 @@ def acquire_session(
     recipe: SessionRecipe,
     args: argparse.Namespace,
     validate: Callable[[Sequence[CookieRecord]], str | None],
+    force: bool = False,
 ) -> Session:
     """Return a cookie set, asking the browser to log in when we have nothing.
 
@@ -873,8 +874,17 @@ def acquire_session(
         return Session(cookies, "explicit")
 
     cached = load_cached_cookies(recipe.cache)
-    if cached and not args.relogin:
+    if cached and not (args.relogin or force):
         return Session(cached, f"cache ({recipe.cache})")
+
+    # The browser may already hold a live session from an earlier visit, so look
+    # before asking for a login - that is what makes a plain run silent when the
+    # session is still good and a cookie file was never written (or was removed).
+    existing = harvest_cookies(recipe.host_suffixes)
+    if existing and validate(existing) is None:
+        log(f"\n{recipe.label}: using the session already in your browser")
+        save_cached_cookies(recipe.cache, existing)
+        return Session(existing, "browser")
 
     log(f"\n{recipe.label}: {recipe.description}")
     log(f"  opening {recipe.login_url}")
@@ -927,9 +937,9 @@ def connect_kv(
         try:
             return client, client.client()
         except (KVNotLoggedIn, KVError) as exc:
-            problems.append(str(exc))
+            problems.append(f"{host_of(base)}: {exc}")
         except requests.RequestException as exc:
-            problems.append(f"{base}: network error: {exc}")
+            problems.append(f"{host_of(base)}: network error: {exc}")
     raise KVNotLoggedIn("; ".join(problems) or "no Kuchnia Vikinga host reachable")
 
 
@@ -973,12 +983,13 @@ def ensure_session(
         die(f"{label}: {problem}")
     warn(f"{label}: {problem}")
     warn("the stored session is no longer valid; refreshing")
-    args.relogin = True
     try:
         Path(recipe.cache).unlink()
     except OSError:
         pass
-    return acquire_session(recipe, args, validate)
+    # force applies to this site only: a stale Kuchnia Vikinga session must not
+    # send the MyFitnessPal session back through a login it does not need
+    return acquire_session(recipe, args, validate, force=True)
 
 
 # --------------------------------------------------------------------------- #

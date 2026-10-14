@@ -29,17 +29,38 @@ and need no extra packages. Both optional packages are commented out in
 ## Logging in
 
 Both services are used through their **web** APIs, so the script needs the same
-cookies your browser gets when you log in. On the first run it:
+cookies your browser gets when you log in.
 
-1. opens the Kuchnia Vikinga panel in your default browser,
+Any run does this on demand — `viking_to_mfp.py --from … --to …` is enough, there
+is no separate login step. For each site in turn it checks the stored session
+against the live API, and only then decides:
+
+| Situation | What happens |
+|---|---|
+| stored session still valid | used silently |
+| no stored session, but the browser is logged in | adopted from the browser, no tab opened |
+| stored session expired | discarded, and the login page opens for that site |
+| not logged in anywhere | the login page opens, and it waits for you |
+
+Each site is decided independently, so an expired Kuchnia Vikinga session never
+sends you back through a MyFitnessPal login you do not need. If a login is needed
+the script also refreshes the cached session afterwards, so the next run is silent
+again.
+
+When it does need a login:
+
+1. opens that site's login page in your default browser,
 2. waits for you to log in (your password manager can fill the form in),
 3. reads the session cookies out of your browser's stores and caches them in
-   `~/.config/kv2mfp/kv_cookies.json`,
-4. repeats the same for MyFitnessPal,
-5. caches that too.
+   `~/.config/kv2mfp/`,
+4. repeats for the other site if it needs one too.
 
-Later runs reuse the cached cookies. Sessions expire eventually; when they do you
-get a clear error and the script opens the login page again.
+If a login does not arrive within `--login-timeout` (180s) the script stops with an
+error, prints every cookie store it could read, and tells you how to paste a cookie
+instead.
+
+Note that `--dry-run` still needs the MyFitnessPal session, because the meal-slot
+mapping comes from your diary's own meal names.
 
 ### Where the cookies come from
 
