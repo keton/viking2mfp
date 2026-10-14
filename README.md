@@ -1,4 +1,4 @@
-# viking-to-myfitnesspal
+# Viking2MFP
 
 Copies **Kuchnia Vikinga** ("box diet") meals into the **MyFitnessPal** food diary.
 
@@ -19,7 +19,7 @@ Developed entirely by Deepseek 4.1 Flash under Oh My Pi harness. Manually tested
 ```
 pipx install viking2mfp                                       # once published on PyPI
 pipx install .                                                # from a checkout
-pipx install "git+https://github.com/<you>/viking-to-myfitnesspal"
+pipx install "git+https://github.com/keton/viking2mfp"
 ```
 
 `pipx` puts `viking2mfp` on your PATH in its own virtualenv. Upgrades and removal are
