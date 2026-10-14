@@ -13,8 +13,13 @@ out/
 __pycache__/
 *.py[cod]
 
-# Analysis virtualenv (hbctool + hermes-dec). The script itself only needs requests.
+# Analysis virtualenv (hbctool + hermes-dec). The package itself only needs requests.
 .venv/
+
+# Build artefacts
+build/
+dist/
+*.egg-info/
 
 # Browser cookie database copies: live session secrets, never commit these.
 cookies.sqlite*

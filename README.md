@@ -7,31 +7,42 @@ fat and protein from Kuchnia Vikinga and writes one MyFitnessPal *quick add* dia
 entry per meal into the matching meal slot.
 
 ```
-viking_to_mfp.py --from 2026-10-14 --to 2026-10-20
+viking2mfp --from 2026-10-14 --to 2026-10-20
 ```
 
-## What it needs
+## Install
 
-* Python 3.9 or newer (written for 3.9+, developed and tested on 3.14)
-* `requests` — `pip install -r requirements.txt`
-* A logged-in browser session for both sites (see below)
+```
+pipx install viking2mfp                                       # once published on PyPI
+pipx install .                                                # from a checkout
+pipx install "git+https://github.com/<you>/viking-to-myfitnesspal"
+```
 
-Optional, only needed if you log in with a Chromium-family browser *and* want the
-script to read its cookie database:
+`pipx` puts `viking2mfp` on your PATH in its own virtualenv. Upgrades and removal are
+`pipx upgrade viking2mfp` / `pipx uninstall viking2mfp`.
 
-* `cryptography` (AES decryption of Chrome's cookie values)
-* `secretstorage` (fetches the "Chrome Safe Storage" key from the session keyring)
+Optional extra, only needed if you log in with a Chromium-family browser (Chrome,
+Brave, Edge, Vivaldi) **and** want the script to read its cookie database, whose
+values are AES-encrypted:
 
-Firefox-family browsers (Firefox, Zen, LibreWolf) store cookie values in plain text
-and need no extra packages. Both optional packages are commented out in
-`requirements.txt`.
+```
+pipx install "viking2mfp[chromium]"
+pipx inject viking2mfp cryptography secretstorage      # for an existing install
+```
+
+Firefox-family browsers (Firefox, Zen, LibreWolf) store cookie values as plain text
+and need neither.
+
+Without pipx, `pip install .` also works, or run it straight from a checkout with
+`python -m viking2mfp`. It needs Python 3.9 or newer (written for 3.9+, developed and
+tested on 3.14) and `requests`, which is declared as a dependency.
 
 ## Logging in
 
 Both services are used through their **web** APIs, so the script needs the same
 cookies your browser gets when you log in.
 
-Any run does this on demand — `viking_to_mfp.py --from … --to …` is enough, there
+Any run does this on demand — `viking2mfp --from … --to …` is enough, there
 is no separate login step. For each site in turn it checks the stored session
 against the live API, and only then decides:
 
@@ -87,8 +98,8 @@ Chromium-family browsers (Chrome, Brave, Edge, Vivaldi) keep session cookies in 
 profile, and is the first thing to run if a login is not picked up:
 
 ```
-viking_to_mfp.py --dump-cookies
-viking_to_mfp.py --dump-cookies kuchniavikinga.pl,myfitnesspal.com
+viking2mfp --dump-cookies
+viking2mfp --dump-cookies kuchniavikinga.pl,myfitnesspal.com
 ```
 
 ### Pasting a cookie instead
@@ -98,7 +109,7 @@ profile, remote/headless box) it tells you so. Copy the header instead from dev
 tools → Network → any request to the site → Request headers → **Cookie**:
 
 ```
-viking_to_mfp.py --from 2026-10-14 \
+viking2mfp --from 2026-10-14 \
   --cookie kv='SESSION=...' \
   --cookie mfp='__Secure-next-auth.session-token=...'
 ```
@@ -112,11 +123,11 @@ viking_to_mfp.py --from 2026-10-14 \
 
 | Command | Effect |
 |---|---|
-| `viking_to_mfp.py --from 2026-10-14 --to 2026-10-20` | copy that window, skipping anything already logged |
-| `viking_to_mfp.py --from 2026-10-01` | copy from that date up to the last delivery Kuchnia Vikinga knows about |
-| `viking_to_mfp.py --from 2026-10-14 --dry-run` | print the table, write nothing |
-| `viking_to_mfp.py --login-only` | just refresh the two sessions |
-| `viking_to_mfp.py --from 2026-10-01 --force` | add everything, even where the diary is already filled |
+| `viking2mfp --from 2026-10-14 --to 2026-10-20` | copy that window, skipping anything already logged |
+| `viking2mfp --from 2026-10-01` | copy from that date up to the last delivery Kuchnia Vikinga knows about |
+| `viking2mfp --from 2026-10-14 --dry-run` | print the table, write nothing |
+| `viking2mfp --login-only` | just refresh the two sessions |
+| `viking2mfp --from 2026-10-01 --force` | add everything, even where the diary is already filled |
 
 Without `--yes` the script prints the full plan (date, KV meal, target MFP meal,
 macros, dish name, totals) and asks before writing anything.
@@ -186,7 +197,7 @@ renamed or reordered diary still works. The mapping is printed before anything i
 written. Override it if needed:
 
 ```
-viking_to_mfp.py --meal-map 'śniadanie=Breakfast,ii śniadanie=Snack'
+viking2mfp --meal-map 'śniadanie=Breakfast,ii śniadanie=Snack'
 ```
 
 ## Safety

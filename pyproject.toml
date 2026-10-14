@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viking2mfp"
+version = "0.1.0"
+description = "Copy Kuchnia Vikinga box-diet meals into the MyFitnessPal food diary"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.25",
+]
+keywords = ["myfitnesspal", "kuchnia-vikinga", "diet", "nutrition", "calories", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Other/Nonlisted Topic",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+# Only needed to read cookies out of Chromium-family browsers (Chrome, Brave,
+# Edge, Vivaldi), whose cookie values are AES-encrypted. Firefox and its forks
+# store them as plain text and need neither.
+chromium = [
+    "cryptography>=41",
+    "secretstorage>=3",
+]
+
+[project.scripts]
+viking2mfp = "viking2mfp.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -26,6 +26,9 @@ GET-only and the MFP client refuses any request outside an explicit allow-list.
 
 from __future__ import annotations
 
+# Keep in step with pyproject.toml; tests/test_pipeline.py asserts they match.
+__version__ = "0.1.0"
+
 import argparse
 import base64
 import json
@@ -1675,18 +1678,20 @@ def confirm(question: str, assume_yes: bool) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # no prog=: argparse takes it from the invocation, so the console script
+    # shows "viking2mfp" and "python -m viking2mfp" shows the module path
     p = argparse.ArgumentParser(
-        prog="viking_to_mfp.py",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  viking_to_mfp.py --from 2026-10-14 --to 2026-10-20\n"
-            "  viking_to_mfp.py --from 2026-10-01            # up to the last known delivery\n"
-            "  viking_to_mfp.py --from 2026-10-14 --dry-run\n"
-            "  viking_to_mfp.py --login-only                 # just refresh both sessions\n"
+            "  viking2mfp --from 2026-10-14 --to 2026-10-20\n"
+            "  viking2mfp --from 2026-10-01            # up to the last known delivery\n"
+            "  viking2mfp --from 2026-10-14 --dry-run\n"
+            "  viking2mfp --login-only                 # just refresh both sessions\n"
         ),
     )
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--from", dest="start", metavar="YYYY-MM-DD",
                    help="first day to copy (default: today)")
     p.add_argument("--to", dest="end", metavar="YYYY-MM-DD",
@@ -1740,6 +1745,28 @@ def parse_meal_map(text: str | None) -> dict[str, str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Console entry point.
+
+    Wrapping the flow here rather than under ``if __name__ == "__main__"`` means
+    the console script, ``python -m viking2mfp`` and a direct call all fail the
+    same way on the errors that are expected in normal use.
+    """
+    try:
+        return _run(argv)
+    except KeyboardInterrupt:
+        sys.stderr.write("\ninterrupted\n")
+        return 130
+    except (KVNotLoggedIn, MFPNotLoggedIn) as exc:
+        die(
+            f"{exc}\n"
+            f"  re-run with --relogin, or pass a fresh cookie with "
+            f"--cookie kv=... / --cookie mfp=..."
+        )
+    except (KVError, requests.RequestException) as exc:
+        die(str(exc))
+
+
+def _run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -1883,15 +1910,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     log(f"\ndone: {written}/{len(pending)} entries written")
     return 0 if written == len(pending) else 1
-
-
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except KeyboardInterrupt:
-        sys.stderr.write("\ninterrupted\n")
-        raise SystemExit(130)
-    except (KVNotLoggedIn, MFPNotLoggedIn) as exc:
-        die(f"{exc}\n  re-run with --relogin, or pass a fresh cookie with --cookie kv=... / --cookie mfp=...")
-    except (KVError, requests.RequestException) as exc:
-        die(str(exc))

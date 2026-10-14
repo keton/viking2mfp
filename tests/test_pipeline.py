@@ -21,7 +21,17 @@ import requests
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-SCRIPT = Path(__file__).resolve().parent.parent / "viking_to_mfp.py"
+REPO = Path(__file__).resolve().parent.parent
+SRC = REPO / "src"
+MODULE = SRC / "viking2mfp" / "cli.py"
+
+
+def run_env() -> dict:
+    """Environment that makes `python -m viking2mfp` find the package."""
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([p for p in (str(SRC), existing) if p])
+    return env
 RECORD: dict[str, list] = {"kv": [], "mfp": []}
 # what has been "logged", served back by read_diary - mirrors MFP's item shape
 DIARY: dict[str, list[dict]] = {}
@@ -320,9 +330,10 @@ MFP_COOKIE = "mfp=__Secure-next-auth.session-token=xyz"
 
 
 def run(*extra: str, expect: int = 0) -> str:
-    cmd = [sys.executable, str(SCRIPT), "--cookie", KV_COOKIE, "--cookie", MFP_COOKIE]
+    cmd = [sys.executable, "-m", "viking2mfp",
+           "--cookie", KV_COOKIE, "--cookie", MFP_COOKIE]
     cmd += list(extra)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=run_env())
     if proc.returncode != expect:
         print(proc.stdout)
         print(proc.stderr, file=sys.stderr)
@@ -418,15 +429,15 @@ def main() -> int:
         assert all(r[0] == "GET" for r in RECORD["kv"]), "a non-GET reached Kuchnia Vikinga"
         assert all(r[3] == "BROWSER_PANEL" for r in RECORD["kv"])
         assert all("remember-me" in (r[2] or "") for r in RECORD["kv"]), "cookies not forwarded"
-        source = SCRIPT.read_text(encoding="utf-8")
+        source = MODULE.read_text(encoding="utf-8")
         body = source[source.index("class KVClient"):source.index("class MFPClient")]
         for verb in ("requests.post", "requests.put", "requests.patch", "requests.delete",
                      ".post(", ".put(", ".patch(", ".delete("):
             assert verb not in body, f"KVClient must never issue {verb}"
 
     def mfp_writes_are_allow_listed():
-        sys.path.insert(0, str(SCRIPT.parent))
-        import viking_to_mfp as v
+        sys.path.insert(0, str(SRC))
+        from viking2mfp import cli as v
 
         client = v.MFPClient([v.CookieRecord("x", "y")], base="http://127.0.0.1:1")
         for method, path in (("DELETE", "/api/services/diary/1"),
@@ -480,9 +491,10 @@ def main() -> int:
         FAIL_READ_DIARY = True
         try:
             proc = subprocess.run(
-                [sys.executable, str(SCRIPT), "--cookie", KV_COOKIE, "--cookie", MFP_COOKIE,
+                [sys.executable, "-m", "viking2mfp",
+                 "--cookie", KV_COOKIE, "--cookie", MFP_COOKIE,
                  "--from", "2026-10-14", "--to", "2026-10-14", "--yes", *base],
-                capture_output=True, text=True)
+                capture_output=True, text=True, env=run_env())
             out = proc.stdout + proc.stderr
             assert proc.returncode != 0, out
             assert "refusing to add entries that may already be there" in out, out
@@ -502,12 +514,26 @@ def main() -> int:
     def dead_session_fails_loudly():
         RECORD["mfp"].clear()
         proc = subprocess.run(
-            [sys.executable, str(SCRIPT), "--cookie", "kv=SESSION=bogus",
+            [sys.executable, "-m", "viking2mfp", "--cookie", "kv=SESSION=bogus",
              "--cookie", MFP_COOKIE, "--from", "2026-10-14", "--yes", *base],
-            capture_output=True, text=True)
+            capture_output=True, text=True, env=run_env())
         assert proc.returncode != 0, "a dead Kuchnia Vikinga session must fail"
         assert "not valid" in proc.stdout + proc.stderr, proc.stdout + proc.stderr
         assert not posted_items(), "must not write with a dead Kuchnia Vikinga session"
+
+    def version_matches_packaging():
+        import re
+
+        pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+        declared = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
+        sys.path.insert(0, str(SRC))
+        from viking2mfp import cli as v
+
+        assert v.__version__ == declared, (v.__version__, declared)
+        out = subprocess.run(
+            [sys.executable, "-m", "viking2mfp", "--version"],
+            capture_output=True, text=True, env=run_env()).stdout
+        assert declared in out, out
 
     def harvested_cookies_survive_set_cookie():
         RECORD["kv"].clear()
@@ -569,8 +595,8 @@ def main() -> int:
 
         from requests.cookies import get_cookie_header
 
-        sys.path.insert(0, str(SCRIPT.parent))
-        import viking_to_mfp as v
+        sys.path.insert(0, str(SRC))
+        from viking2mfp import cli as v
 
         recovery = base64.b64decode(RECOVERY_B64)
         previous = base64.b64decode(PREVIOUS_B64)
@@ -629,8 +655,8 @@ def main() -> int:
         import pathlib
         import tempfile
 
-        sys.path.insert(0, str(SCRIPT.parent))
-        import viking_to_mfp as v
+        sys.path.insert(0, str(SRC))
+        from viking2mfp import cli as v
 
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="kv2mfp-sess-"))
         kv_cache = tmp / "kv.json"
@@ -691,6 +717,7 @@ def main() -> int:
                 real_open, real_harvest, real_dump)
 
     check("login need is detected per site", login_is_detected_per_site)
+    check("--version matches pyproject.toml", version_matches_packaging)
 
     if failures:
         print(f"\n{len(failures)} check(s) failed")
