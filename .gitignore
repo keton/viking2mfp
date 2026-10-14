@@ -1,0 +1,20 @@
+# Downloaded app containers and anything derived from them: large third-party
+# binaries, not part of this project.
+apks/
+*.apk
+*.xapk
+*.apks
+*.apkm
+
+# Analysis byproducts: merged APKs, the extracted Hermes bundle, decompiled JS.
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Analysis virtualenv (hbctool + hermes-dec). The script itself only needs requests.
+.venv/
+
+# Browser cookie database copies: live session secrets, never commit these.
+cookies.sqlite*

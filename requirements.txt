@@ -1,0 +1,9 @@
+# The script needs this and nothing else.
+requests>=2.25
+
+# Optional. Only used to read cookies out of Chromium-family browsers (Chrome,
+# Brave, Edge, Vivaldi), whose cookie values are AES-encrypted. Firefox and its
+# forks (Firefox, Zen, LibreWolf) store them as plain text and need neither.
+#
+#   cryptography
+#   secretstorage
