@@ -82,6 +82,9 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / 
 KV_COOKIE_CACHE = CONFIG_DIR / "kv_cookies.json"
 MFP_COOKIE_CACHE = CONFIG_DIR / "mfp_cookies.json"
 
+# How many deliveries in a row with no published menu before the walk gives up.
+DEFAULT_MENU_GAP = 3
+
 # Kuchnia Vikinga meal slots, in the order a box diet serves them.
 KV_MEAL_ORDER = ("śniadanie", "ii śniadanie", "obiad", "podwieczorek", "kolacja")
 # spellings that mean the same slot
@@ -1331,29 +1334,32 @@ def collect_kv_meals(
     end: date | None,
     *,
     with_side_orders: bool = False,
+    menu_gap: int = DEFAULT_MENU_GAP,
 ) -> list[Meal]:
-    """Walk every order -> delivery -> day menu and return the meals in range."""
+    """Every meal in range, walking the deliveries in date order.
+
+    Menus are only published a couple of weeks ahead, so the tail of a long order
+    is empty. Walking it anyway costs one request per delivery and produces a wall
+    of warnings, so the walk gives up after ``menu_gap`` deliveries in a row come
+    back empty.
+
+    Days with no delivery at all - public holidays - are simply absent from the
+    list, so they never count towards that run: a holiday gap does not end the
+    walk, only a stretch of deliveries whose menu is missing does.
+    """
     orders = client.orders()
     if not orders:
         log("no Kuchnia Vikinga orders found on this account")
         return []
 
-    meals: list[Meal] = []
+    candidates: list[tuple[date, Any, Any]] = []
     for order in orders:
         order_id = first_present(order, ("orderId", "id"))
-        if order_id is None:
+        if order_id is None or not _order_overlaps(order, start, end):
             continue
-        if not _order_overlaps(order, start, end):
-            continue
-        detail = client.order(order_id)
-        if not detail:
-            detail = order
+        detail = client.order(order_id) or order
         deliveries = _deliveries_of(detail) or _deliveries_of(order)
-        status = first_present(detail, ("orderStatus", "status"), default="")
-        log(
-            f"order {order_id}"
-            f"{f' ({status})' if status else ''}: {len(deliveries)} deliveries"
-        )
+        in_range = 0
         for delivery in deliveries:
             if delivery.get("deleted"):
                 continue
@@ -1367,50 +1373,124 @@ def collect_kv_meals(
                 continue
             if day < start or (end is not None and day > end):
                 continue
+            candidates.append((day, order_id, delivery_id))
+            in_range += 1
+        log(f"order {order_id}: {in_range} of {len(deliveries)} deliveries in range")
 
-            menu = client.day_menu(delivery_id)
-            for entry in _meals_from_day_menu(delivery_id, menu):
-                if entry.get("deleted"):
-                    continue
-                slot = _meal_slot_of(entry)
-                if not slot:
-                    continue
-                if not with_side_orders and norm_key(slot).startswith("dodatek"):
-                    continue
-                nutrition = _nutrition_of(entry)
-                amount = as_number(first_present(entry, ("amount", "quantity", "count")), 1.0) or 1.0
-                calories = as_number(
-                    first_present(nutrition, ("calories", "energy", "kcal", "energyValue"))
-                )
-                carbohydrates = as_number(
-                    first_present(nutrition, ("carbohydrate", "carbohydrates", "carbs"))
-                )
-                fat = as_number(first_present(nutrition, ("fat", "fats")))
-                protein = as_number(
-                    first_present(nutrition, ("protein", "proteins"))
-                )
-                if calories <= 0 and carbohydrates <= 0 and fat <= 0 and protein <= 0:
-                    warn(
-                        f"delivery {delivery_id}: '{slot}' has no nutrition, skipping"
-                    )
-                    continue
-                meals.append(
-                    Meal(
-                        day=day,
-                        meal_name=slot,
-                        dish=_dish_name_of(entry),
-                        calories=calories * amount,
-                        carbohydrates=carbohydrates * amount,
-                        fat=fat * amount,
-                        protein=protein * amount,
-                        amount=amount,
-                        source=f"order {order_id}/delivery {delivery_id}"
-                        + (f"/meal {first_present(entry, ('deliveryMealId', 'menuMealId'))}"
-                           if first_present(entry, ("deliveryMealId", "menuMealId")) else ""),
-                    )
-                )
+    candidates.sort(key=lambda item: item[0])
+    if not candidates:
+        return []
+
+    meals: list[Meal] = []
+    empty: list[date] = []
+    unchecked: list[date] = []
+    published_through: date | None = None
+    run = 0
+    for index, (day, order_id, delivery_id) in enumerate(candidates):
+        entries = _meals_from_day_menu(delivery_id, client.day_menu(delivery_id))
+        day_meals, missing = _meals_of_day(
+            entries, day, order_id, delivery_id, with_side_orders=with_side_orders
+        )
+        if not day_meals:
+            # The delivery is known but its menu carries no values yet: that is
+            # the unpublished tail, not an error, so it is counted in bulk.
+            empty.append(day)
+            run += 1
+            if menu_gap and run >= menu_gap:
+                unchecked = [d for d, _, _ in candidates[index + 1:]]
+                break
+            continue
+        if missing:
+            warn(
+                f"delivery {delivery_id} ({day}): no nutrition for "
+                f"{', '.join(missing)} - skipped"
+            )
+        run = 0
+        published_through = day
+        meals.extend(day_meals)
+
+    report_menu_coverage(published_through, empty, unchecked)
     meals.sort(key=lambda m: (m.day, _slot_index(m.meal_name), m.dish))
     return meals
+
+
+def _meals_of_day(
+    entries: Sequence[dict],
+    day: date,
+    order_id: Any,
+    delivery_id: Any,
+    *,
+    with_side_orders: bool,
+) -> tuple[list[Meal], list[str]]:
+    """Meals for one delivery, plus the slots that had no nutrition values."""
+    meals: list[Meal] = []
+    missing: list[str] = []
+    for entry in entries:
+        if entry.get("deleted"):
+            continue
+        slot = _meal_slot_of(entry)
+        if not slot:
+            continue
+        if not with_side_orders and norm_key(slot).startswith("dodatek"):
+            continue
+        nutrition = _nutrition_of(entry)
+        amount = as_number(first_present(entry, ("amount", "quantity", "count")), 1.0) or 1.0
+        calories = as_number(
+            first_present(nutrition, ("calories", "energy", "kcal", "energyValue"))
+        )
+        carbohydrates = as_number(
+            first_present(nutrition, ("carbohydrate", "carbohydrates", "carbs"))
+        )
+        fat = as_number(first_present(nutrition, ("fat", "fats")))
+        protein = as_number(first_present(nutrition, ("protein", "proteins")))
+        if calories <= 0 and carbohydrates <= 0 and fat <= 0 and protein <= 0:
+            missing.append(slot)
+            continue
+        meal_id = first_present(entry, ("deliveryMealId", "menuMealId"))
+        meals.append(
+            Meal(
+                day=day,
+                meal_name=slot,
+                dish=_dish_name_of(entry),
+                calories=calories * amount,
+                carbohydrates=carbohydrates * amount,
+                fat=fat * amount,
+                protein=protein * amount,
+                amount=amount,
+                source=f"order {order_id}/delivery {delivery_id}"
+                + (f"/meal {meal_id}" if meal_id else ""),
+            )
+        )
+    return meals, missing
+
+
+def report_menu_coverage(
+    published_through: date | None,
+    empty: Sequence[date],
+    unchecked: Sequence[date],
+) -> None:
+    """One summary for the unpublished tail instead of a warning per meal."""
+    if not empty and not unchecked:
+        return
+    no_menu = sorted([*empty, *unchecked])
+    log()
+    log(
+        "note: menus are published through "
+        + (
+            published_through.isoformat()
+            if published_through
+            else "(nothing in this range)"
+        )
+    )
+    log(
+        f"note: no menu yet for {len(no_menu)} deliveries "
+        f"({no_menu[0].isoformat()} .. {no_menu[-1].isoformat()})"
+    )
+    if unchecked:
+        log(
+            f"      gave up after {len(empty)} empty in a row, {len(unchecked)} left "
+            f"unchecked; --menu-gap 0 reads the whole range"
+        )
 
 
 def _slot_index(name: str) -> int:
@@ -1616,6 +1696,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", "-y", action="store_true", help="do not ask for confirmation")
     p.add_argument("--force", action="store_true",
                    help="add meals even where the diary slot is already filled")
+    p.add_argument("--menu-gap", type=int, default=DEFAULT_MENU_GAP, metavar="N",
+                   help="give up reading once N deliveries in a row have no menu "
+                        "published yet (default %(default)s; 0 reads the whole range). "
+                        "Days with no delivery, such as public holidays, never count "
+                        "towards the run")
     p.add_argument("--side-orders", action="store_true",
                    help="also copy extra paid side orders, if the menu exposes them")
     p.add_argument("--energy-unit", choices=("calories", "kilojoules"), default="calories",
@@ -1733,7 +1818,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     log()
     log(f"reading Kuchnia Vikinga meals from {start} to {end or 'the last known delivery'} ...")
-    meals = collect_kv_meals(kv, start, end, with_side_orders=args.side_orders)
+    meals = collect_kv_meals(
+        kv, start, end, with_side_orders=args.side_orders, menu_gap=args.menu_gap
+    )
     if not meals:
         log("nothing to copy")
         return 0

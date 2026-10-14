@@ -142,6 +142,32 @@ If a day's diary cannot be read, the script stops with an error rather than assu
 nothing is logged — guessing there would duplicate entries, so `--force` is the
 only way past it.
 
+### Before the menu is published
+
+A diet can be ordered months ahead, but Kuchnia Vikinga only publishes the actual
+meals two or three weeks in advance. On a long order that leaves a large tail of
+deliveries whose dishes exist but carry no calorie or macro values yet.
+
+The script reads that tail in bulk instead of per meal, and gives up after three
+deliveries in a row come back with no values:
+
+```
+note: menus are published through 2026-10-28
+note: no menu yet for 71 deliveries (2026-10-29 .. 2027-01-07)
+      gave up after 3 empty in a row, 68 left unchecked; --menu-gap 0 reads the whole range
+```
+
+So `--from 2026-10-14` with no `--to` reads to the end of the published menu and
+stops, rather than requesting the whole order and printing a warning per dish. The
+note tells you exactly what was checked and what was left.
+
+**Holiday gaps do not end the walk.** Days with no delivery at all — the three
+delivery-free days around Easter, say — are simply absent from the delivery list, so
+they never count towards the run of empty days. The walk only gives up on a stretch
+of deliveries that exist *and* have no values, which is the unpublished tail.
+
+`--menu-gap N` changes the threshold; `--menu-gap 0` checks every delivery in range.
+
 ### Meal slots
 
 Kuchnia Vikinga serves five meals a day and the script lines them up with your

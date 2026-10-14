@@ -39,6 +39,11 @@ DELIVERIES = {
             {"deliveryId": 9005, "date": "2026-10-18"},
             {"deliveryId": 9006, "date": "2026-10-19"},
             {"deliveryId": 9007, "date": "2026-10-20"},
+            {"deliveryId": 9008, "date": "2026-12-01"},
+            {"deliveryId": 9009, "date": "2026-12-02"},
+            {"deliveryId": 9010, "date": "2026-12-03"},
+            {"deliveryId": 9011, "date": "2026-12-04"},
+            {"deliveryId": 9012, "date": "2026-12-05"},
         ],
     },
     "222": {
@@ -74,7 +79,18 @@ ONE_MEAL = [{
 }]
 
 
+# deliveries whose menu is not defined yet: the meals are listed, the values are not
+UNPUBLISHED = {"9008", "9009", "9010", "9011", "9012"}
+
+
 def menu_for(delivery_id: str) -> dict:
+    if delivery_id in UNPUBLISHED:
+        return {"deliveryMenuMeal": [
+            {"deliveryMealId": 900 + n, "mealName": name, "amount": 1,
+             "menuMealName": "", "nutrition": {}}
+            for n, name in enumerate(["\u015bniadanie", "II \u015bniadanie", "obiad",
+                                      "Podwieczorek", "Kolacja"])
+        ]}
     return {"deliveryMenuMeal": ONE_MEAL if delivery_id == "9101" else FIVE_MEALS}
 
 
@@ -314,6 +330,10 @@ def run(*extra: str, expect: int = 0) -> str:
     return proc.stdout
 
 
+def menu_calls() -> list[str]:
+    return [r[1] for r in RECORD["kv"] if "/menus/delivery/" in r[1]]
+
+
 def posted_items() -> list[dict]:
     return [json.loads(r[2])["items"][0] for r in RECORD["mfp"] if r[0] == "POST"]
 
@@ -510,6 +530,32 @@ def main() -> int:
     check("Kuchnia Vikinga is only ever read", kv_is_never_written_to)
     check("MFP writes are allow-listed", mfp_writes_are_allow_listed)
     check("meals already in the diary are skipped", already_logged_meals_are_skipped)
+    def the_unpublished_tail_is_summarised_not_walked():
+        RECORD["kv"].clear()
+        out = run(*base, "--from", "2026-12-01", "--to", "2026-12-05", "--dry-run")
+        # one summary, not five warnings per delivery
+        assert "warning:" not in out, out
+        assert "no menu yet for 5 deliveries (2026-12-01 .. 2026-12-05)" in out, out
+        assert "gave up after 3 empty in a row, 2 left unchecked" in out, out
+        assert len(menu_calls()) == 3, menu_calls()
+
+        RECORD["kv"].clear()
+        out = run(*base, "--from", "2026-12-01", "--to", "2026-12-05",
+                  "--menu-gap", "0", "--dry-run")
+        assert len(menu_calls()) == 5, menu_calls()
+        assert "gave up after" not in out, out
+        assert "warning:" not in out, out
+
+    def a_published_day_is_never_mistaken_for_an_empty_one():
+        # 11-30 has a real menu; the run must walk past the empty days before it
+        out = run(*base, "--from", "2026-10-16", "--to", "2026-11-30", "--dry-run")
+        assert "2026-11-30" in out, out
+        assert "no menu yet" not in out, out
+
+    check("the unpublished tail is summarised, not walked",
+          the_unpublished_tail_is_summarised_not_walked)
+    check("a published day is never mistaken for an empty one",
+          a_published_day_is_never_mistaken_for_an_empty_one)
     check("an unreadable diary refuses to write", an_unreadable_diary_refuses_to_write)
     check("dry run reports what it would skip", dry_run_reports_what_it_would_skip)
     check("dead session fails loudly", dead_session_fails_loudly)
