@@ -23,6 +23,9 @@ from urllib.parse import parse_qs, urlparse
 
 SCRIPT = Path(__file__).resolve().parent.parent / "viking_to_mfp.py"
 RECORD: dict[str, list] = {"kv": [], "mfp": []}
+# what has been "logged", served back by read_diary - mirrors MFP's item shape
+DIARY: dict[str, list[dict]] = {}
+FAIL_READ_DIARY = False
 
 DELIVERIES = {
     "111": {
@@ -32,6 +35,10 @@ DELIVERIES = {
             {"deliveryId": 9001, "date": "2026-10-14"},
             {"deliveryId": 9002, "date": "2026-10-15"},
             {"deliveryId": 9003, "date": "2026-11-30"},
+            {"deliveryId": 9004, "date": "2026-10-17"},
+            {"deliveryId": 9005, "date": "2026-10-18"},
+            {"deliveryId": 9006, "date": "2026-10-19"},
+            {"deliveryId": 9007, "date": "2026-10-20"},
         ],
     },
     "222": {
@@ -248,6 +255,12 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/api/auth/csrf":
             return self._send(200, {"csrfToken": "csrf-smoke-token"},
                               set_cookie="__Host-next-auth.csrf-token=smoke; Path=/; Secure")
+        if url.path == "/api/services/diary/read_diary":
+            if FAIL_READ_DIARY:
+                return self._send(500, {"error": "diary unavailable"})
+            query = parse_qs(url.query)
+            day = (query.get("entry_date") or [""])[0]
+            return self._send(200, DIARY.get(day, []))
         if url.path == "/api/services/users":
             query = parse_qs(url.query)
             assert any("diary_preferences" in v for v in query.get("fields[]", [])), url.query
@@ -255,6 +268,7 @@ class Handler(BaseHTTPRequestHandler):
                 "diary_preferences": {
                     "meal_names": ["Breakfast", "2nd Breakfast", "Lunch", "Dessert", "Supper"]
                 },
+                "username": "smokeuser",
                 "account": {"username": "smokeuser"},
             })
         return self._send(404, {"error": "not found", "path": url.path})
@@ -265,7 +279,16 @@ class Handler(BaseHTTPRequestHandler):
                               self.headers.get("X-CSRF-Token"),
                               self.headers.get("Cookie")))
         if self.path == "/api/services/diary":
-            return self._send(200, {"items": json.loads(body)["items"]})
+            items = json.loads(body)["items"]
+            for n, item in enumerate(items):
+                DIARY.setdefault(item["date"], []).append({
+                    "id": f"entry-{len(DIARY.get(item['date'], []))}-{n}",
+                    "type": "food_entry",
+                    "date": item["date"],
+                    "meal_name": item["meal_name"],
+                    "nutritional_contents": item["nutritional_contents"],
+                })
+            return self._send(200, {"items": items})
         return self._send(404, {"error": "not found"})
 
 
@@ -280,16 +303,10 @@ KV_COOKIE = "kv=SESSION=abc; remember-me=def"
 MFP_COOKIE = "mfp=__Secure-next-auth.session-token=xyz"
 
 
-def run(*extra: str, expect: int = 0, use_state: bool = False, tmp: str | None = None) -> str:
+def run(*extra: str, expect: int = 0) -> str:
     cmd = [sys.executable, str(SCRIPT), "--cookie", KV_COOKIE, "--cookie", MFP_COOKIE]
-    if not use_state:
-        cmd.append("--no-state")
     cmd += list(extra)
-    env = dict(os.environ)
-    if tmp:
-        env["XDG_STATE_HOME"] = tmp
-        env["XDG_CONFIG_HOME"] = tmp
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != expect:
         print(proc.stdout)
         print(proc.stderr, file=sys.stderr)
@@ -306,6 +323,9 @@ def main() -> int:
     failures = []
 
     def check(name: str, fn) -> None:
+        # each check starts from an empty diary; RECORD["kv"] deliberately keeps
+        # accumulating because one check asserts on the whole KV call history
+        DIARY.clear()
         try:
             fn()
         except AssertionError as exc:
@@ -368,7 +388,10 @@ def main() -> int:
     def from_only_runs_to_last_delivery():
         RECORD["mfp"].clear()
         run(*base, "--from", "2026-10-16", "--yes")
-        assert {i["date"] for i in posted_items()} == {"2026-10-16", "2026-11-30"}
+        assert {i["date"] for i in posted_items()} == {
+            "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19",
+            "2026-10-20", "2026-11-30",
+        }
 
     def kv_is_never_written_to():
         assert RECORD["kv"], "no Kuchnia Vikinga calls recorded"
@@ -389,9 +412,10 @@ def main() -> int:
         for method, path in (("DELETE", "/api/services/diary/1"),
                              ("PUT", "/api/services/diary/1"),
                              ("PATCH", "/api/services/diary/1"),
-                             ("POST", "/api/services/diary/read_diary"),
                              ("POST", "/api/services/users"),
-                             ("GET", "/api/services/diary/read_diary")):
+                             ("POST", "/api/services/diary/read_diary"),
+                             ("GET", "/api/services/diary/1"),
+                             ("GET", "/api/services/diary")):
             try:
                 client._request(method, path)
             except PermissionError:
@@ -399,22 +423,67 @@ def main() -> int:
             raise AssertionError(f"{method} {path} was not refused")
         assert not [r for r in RECORD["mfp"] if r[0] in ("DELETE", "PUT", "PATCH")]
 
-    def state_file_prevents_duplicates():
-        tmp = tempfile.mkdtemp(prefix="kv2mfp-test-")
+    def already_logged_meals_are_skipped():
+        # whatever a previous run wrote is visible in the diary, so a second run
+        # must add nothing - with no local bookkeeping to go stale
+        DIARY.clear()
         RECORD["mfp"].clear()
-        run(*base, "--from", "2026-10-14", "--to", "2026-10-14", "--yes",
-            use_state=True, tmp=tmp)
-        first = len(posted_items())
-        run(*base, "--from", "2026-10-14", "--to", "2026-10-14", "--yes",
-            use_state=True, tmp=tmp)
-        assert first == 5, f"first run wrote {first} entries"
-        assert len(posted_items()) == 5, "second run duplicated entries"
+        first = run(*base, "--from", "2026-10-14", "--to", "2026-10-16", "--yes")
+        assert len(posted_items()) == 11, len(posted_items())
+
+        RECORD["mfp"].clear()
+        second = run(*base, "--from", "2026-10-14", "--to", "2026-10-16", "--yes")
+        assert posted_items() == [], "a second run duplicated entries"
+        assert "already in the diary" in second, second
+
+        # a wider range only fills the gaps
+        RECORD["mfp"].clear()
+        third = run(*base, "--from", "2026-10-14", "--to", "2026-10-20", "--yes")
+        added = sorted((i["date"], i["meal_name"]) for i in posted_items())
+        assert len(added) == 20, added
+        assert {d for d, _ in added} == {
+            "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20",
+        }, added
+        # the three days already logged are untouched, including 2026-10-16
+        assert ("2026-10-16", "Breakfast") not in added, added
+        assert "already in the diary, skipped: 11 meal(s)" in third, third
+
+        # --force overrides it
+        RECORD["mfp"].clear()
+        run(*base, "--from", "2026-10-14", "--to", "2026-10-16", "--yes", "--force")
+        assert len(posted_items()) == 11, len(posted_items())
+
+    def an_unreadable_diary_refuses_to_write():
+        global FAIL_READ_DIARY
+        DIARY.clear()
+        RECORD["mfp"].clear()
+        FAIL_READ_DIARY = True
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--cookie", KV_COOKIE, "--cookie", MFP_COOKIE,
+                 "--from", "2026-10-14", "--to", "2026-10-14", "--yes", *base],
+                capture_output=True, text=True)
+            out = proc.stdout + proc.stderr
+            assert proc.returncode != 0, out
+            assert "refusing to add entries that may already be there" in out, out
+            assert not posted_items(), "wrote without being able to check the diary"
+        finally:
+            FAIL_READ_DIARY = False
+
+    def dry_run_reports_what_it_would_skip():
+        DIARY.clear()
+        run(*base, "--from", "2026-10-14", "--to", "2026-10-14", "--yes")
+        RECORD["mfp"].clear()
+        out = run(*base, "--from", "2026-10-14", "--to", "2026-10-14", "--dry-run")
+        assert "already in the diary" in out, out
+        assert "nothing to copy" not in out
+        assert not posted_items(), "dry run must not write"
 
     def dead_session_fails_loudly():
         RECORD["mfp"].clear()
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--cookie", "kv=SESSION=bogus",
-             "--cookie", MFP_COOKIE, "--no-state", "--from", "2026-10-14", "--yes", *base],
+             "--cookie", MFP_COOKIE, "--from", "2026-10-14", "--yes", *base],
             capture_output=True, text=True)
         assert proc.returncode != 0, "a dead Kuchnia Vikinga session must fail"
         assert "not valid" in proc.stdout + proc.stderr, proc.stdout + proc.stderr
@@ -440,7 +509,9 @@ def main() -> int:
     check("--from alone runs to the last delivery", from_only_runs_to_last_delivery)
     check("Kuchnia Vikinga is only ever read", kv_is_never_written_to)
     check("MFP writes are allow-listed", mfp_writes_are_allow_listed)
-    check("state file prevents duplicate pushes", state_file_prevents_duplicates)
+    check("meals already in the diary are skipped", already_logged_meals_are_skipped)
+    check("an unreadable diary refuses to write", an_unreadable_diary_refuses_to_write)
+    check("dry run reports what it would skip", dry_run_reports_what_it_would_skip)
     check("dead session fails loudly", dead_session_fails_loudly)
     check("harvested cookies survive Set-Cookie responses",
           harvested_cookies_survive_set_cookie)

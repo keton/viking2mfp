@@ -112,19 +112,35 @@ viking_to_mfp.py --from 2026-10-14 \
 
 | Command | Effect |
 |---|---|
-| `viking_to_mfp.py --from 2026-10-14 --to 2026-10-20` | copy that window |
+| `viking_to_mfp.py --from 2026-10-14 --to 2026-10-20` | copy that window, skipping anything already logged |
 | `viking_to_mfp.py --from 2026-10-01` | copy from that date up to the last delivery Kuchnia Vikinga knows about |
 | `viking_to_mfp.py --from 2026-10-14 --dry-run` | print the table, write nothing |
 | `viking_to_mfp.py --login-only` | just refresh the two sessions |
-| `viking_to_mfp.py --print-state` | show what earlier runs already pushed |
-| `viking_to_mfp.py --from 2026-10-01 --force` | re-send meals a previous run pushed |
+| `viking_to_mfp.py --from 2026-10-01 --force` | add everything, even where the diary is already filled |
 
 Without `--yes` the script prints the full plan (date, KV meal, target MFP meal,
 macros, dish name, totals) and asks before writing anything.
 
-Every run records what it pushed in `~/.local/state/kv2mfp/pushed.json`, keyed by
-date + meal + macros, so running it twice does not duplicate entries. `--no-state`
-disables that, `--force` ignores it.
+### Running it twice is safe
+
+The diary itself is the record of what has been copied, so there is no local
+bookkeeping to keep in step and nothing to remember between runs. Before adding
+anything the script reads each day it is about to touch, and **a meal is skipped
+when its diary slot for that day already holds an entry** — regardless of what that
+entry is, or which machine or run put it there:
+
+```
+already in the diary, skipped: 25 meal(s) (use --force to add them anyway)
+  2026-10-14  Śniadanie (571 kcal), II śniadanie (317 kcal), Obiad (557 kcal), …
+  2026-10-15  Śniadanie (533 kcal), …
+```
+
+So `--from 2026-10-14 --to 2026-10-28` fills the gaps and leaves the days you have
+already dealt with alone. `--force` overrides the check and adds everything anyway.
+
+If a day's diary cannot be read, the script stops with an error rather than assume
+nothing is logged — guessing there would duplicate entries, so `--force` is the
+only way past it.
 
 ### Meal slots
 
@@ -154,13 +170,14 @@ generic request method, so the script cannot start, modify, cancel or pay for an
 order. The API is the same one the panel and the mobile app use, and every request
 is a plain GET.
 
-The MyFitnessPal side is restricted by an explicit allow-list — the only write the
-script can perform is a diary quick-add entry:
+The MyFitnessPal side is restricted by an explicit allow-list — reading the diary
+and adding a quick-add entry, nothing else:
 
 ```python
 ALLOWED = {
     ("GET",  "/api/auth/csrf"),
     ("GET",  "/api/services/users"),
+    ("GET",  "/api/services/diary/read_diary"),
     ("POST", "/api/services/diary"),
 }
 ```
@@ -211,7 +228,9 @@ A Next.js + NextAuth web app. Base: `https://www.myfitnesspal.com`.
 
 * auth — NextAuth session cookie `__Secure-next-auth.session-token`.
 * CSRF — `GET /api/auth/csrf` → `csrfToken`, echoed back in `X-CSRF-Token`.
-* `GET /api/services/users?fields[]=...` → `diary_preferences.meal_names`.
+* `GET /api/services/users?fields[]=...` → `diary_preferences.meal_names`, `username`.
+* `GET /api/services/diary/read_diary?entry_date=...&username=...` → what is already
+  logged for a day, used to skip meals that are already there.
 * `POST /api/services/diary` with exactly what the `/food/quick-add` page posts:
 
 ```json

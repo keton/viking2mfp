@@ -79,10 +79,8 @@ UA = (
 )
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "kv2mfp"
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "kv2mfp"
 KV_COOKIE_CACHE = CONFIG_DIR / "kv_cookies.json"
 MFP_COOKIE_CACHE = CONFIG_DIR / "mfp_cookies.json"
-STATE_FILE = STATE_DIR / "pushed.json"
 
 # Kuchnia Vikinga meal slots, in the order a box diet serves them.
 KV_MEAL_ORDER = ("śniadanie", "ii śniadanie", "obiad", "podwieczorek", "kolacja")
@@ -1104,6 +1102,7 @@ class MFPClient:
     ALLOWED: frozenset[tuple[str, str]] = frozenset({
         ("GET", "/api/auth/csrf"),
         ("GET", "/api/services/users"),
+        ("GET", "/api/services/diary/read_diary"),
         ("POST", "/api/services/diary"),
     })
 
@@ -1128,6 +1127,8 @@ class MFPClient:
             "Referer": f"{self.base}/food/diary",
         })
         self._csrf: str | None = None
+        self._username: str | None = None
+        self._user: dict | None = None
 
     # -- transport ---------------------------------------------------------- #
 
@@ -1166,15 +1167,42 @@ class MFPClient:
     # -- endpoints ---------------------------------------------------------- #
 
     def user(self) -> dict:
-        query = "&".join(f"fields[]={f}" for f in self.USER_FIELDS)
-        resp = self._request("GET", f"/api/services/users?{query}")
-        resp.raise_for_status()
-        data = resp.json()
-        return data if isinstance(data, dict) else {}
+        if self._user is None:
+            query = "&".join(f"fields[]={f}" for f in self.USER_FIELDS)
+            resp = self._request("GET", f"/api/services/users?{query}")
+            resp.raise_for_status()
+            data = resp.json()
+            self._user = data if isinstance(data, dict) else {}
+        return self._user
 
     def meal_names(self) -> list[str]:
         names = json_get(self.user(), "diary_preferences", "meal_names", default=[])
         return [str(n) for n in names] if isinstance(names, list) else []
+
+    def username(self) -> str:
+        if self._username is None:
+            self._username = str(self.user().get("username") or "")
+        return self._username
+
+    def diary_entries(self, day: str) -> list[dict]:
+        """Everything already logged for one day, so we can skip what is there."""
+        resp = self._request(
+            "GET", "/api/services/diary/read_diary",
+            params={
+                "entry_date": day,
+                "fields": "all",
+                "types": "food_entry,exercise_entry,steps_aggregate",
+                "username": self.username(),
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = data if isinstance(data, list) else (data.get("items") or [])
+        # exercise and step entries carry no meal slot; only food matters here
+        return [
+            item for item in items
+            if isinstance(item, dict) and item.get("meal_name")
+        ]
 
     def add_quick_add(
         self,
@@ -1226,15 +1254,6 @@ class Meal:
     protein: float
     amount: float = 1.0
     source: str = ""        # delivery/meal ids, for traceability
-
-    def fingerprint(self) -> str:
-        return "|".join((
-            self.day.isoformat(), norm_key(self.meal_name), self.dish,
-            f"{round_half_up(self.calories, 1):g}",
-            f"{round_half_up(self.carbohydrates, 1):g}",
-            f"{round_half_up(self.fat, 1):g}",
-            f"{round_half_up(self.protein, 1):g}",
-        ))
 
 
 def _nutrition_of(meal: dict) -> dict:
@@ -1456,27 +1475,73 @@ def _match_by_name(key: str, mfp_meals: Sequence[str]) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# push state (so a second run does not duplicate yesterday's entries)
+# what is already in the diary
 # --------------------------------------------------------------------------- #
 
 
-def load_state() -> dict[str, str]:
-    if not STATE_FILE.exists():
-        return {}
-    try:
-        data = json.loads(STATE_FILE.read_text("utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+def day_energies(entries: Iterable[dict]) -> dict[str, list[float]]:
+    """meal slot (normalised) -> logged calories, for one day's entries."""
+    by_slot: dict[str, list[float]] = {}
+    for entry in entries:
+        slot = norm_key(entry.get("meal_name"))
+        value = as_number(
+            json_get(entry, "nutritional_contents", "energy", "value"), None
+        )
+        by_slot.setdefault(slot, []).append(value if value is not None else 0.0)
+    return by_slot
 
 
-def save_state(state: dict[str, str]) -> None:
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    except OSError as exc:
-        warn(f"could not record the push in {STATE_FILE} ({exc}); "
-             f"a later run may duplicate these entries")
+def split_already_logged(
+    mfp: MFPClient, meals: Sequence[Meal], mapping: dict[str, str]
+) -> tuple[list[Meal], list[tuple[Meal, list[float]]]]:
+    """Drop meals whose diary slot for that day is already occupied.
+
+    The diary itself is the record of what has been pushed, so no local
+    bookkeeping is needed and the script stays correct across machines, after a
+    ``--force``, or when meals were logged by hand.
+    """
+    by_day: dict[date, list[Meal]] = {}
+    for meal in meals:
+        by_day.setdefault(meal.day, []).append(meal)
+
+    pending: list[Meal] = []
+    skipped: list[tuple[Meal, list[float]]] = []
+    for day, day_meals in sorted(by_day.items()):
+        try:
+            logged = day_energies(mfp.diary_entries(day.isoformat()))
+        except (MFPNotLoggedIn, PermissionError):
+            raise
+        except (requests.RequestException, ValueError) as exc:
+            # Guessing here would duplicate everything, which is the one outcome
+            # worth refusing to risk; --force is the explicit override.
+            die(
+                f"could not read the MyFitnessPal diary for {day} ({exc})\n"
+                f"  refusing to add entries that may already be there.\n"
+                f"  re-run with --force to add them without checking."
+            )
+        for meal in day_meals:
+            occupied = logged.get(norm_key(mapping[meal.meal_name]))
+            if occupied:
+                skipped.append((meal, occupied))
+            else:
+                pending.append(meal)
+    return pending, skipped
+
+
+def report_skipped(skipped: Sequence[tuple[Meal, list[float]]]) -> None:
+    if not skipped:
+        return
+    by_day: dict[date, list[str]] = {}
+    for meal, energies in skipped:
+        shown = "/".join(f"{round_half_up(e):.0f}" for e in energies if e)
+        by_day.setdefault(meal.day, []).append(
+            meal.meal_name + (f" ({shown} kcal)" if shown else "")
+        )
+    log()
+    log(f"already in the diary, skipped: {len(skipped)} meal(s) "
+        f"(use --force to add them anyway)")
+    for day, details in sorted(by_day.items()):
+        log(f"  {day}  " + ", ".join(details))
 
 
 # --------------------------------------------------------------------------- #
@@ -1550,9 +1615,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="show what would be written, write nothing to MyFitnessPal")
     p.add_argument("--yes", "-y", action="store_true", help="do not ask for confirmation")
     p.add_argument("--force", action="store_true",
-                   help="re-send meals that a previous run already pushed")
-    p.add_argument("--no-state", action="store_true",
-                   help="do not remember what was pushed")
+                   help="add meals even where the diary slot is already filled")
     p.add_argument("--side-orders", action="store_true",
                    help="also copy extra paid side orders, if the menu exposes them")
     p.add_argument("--energy-unit", choices=("calories", "kilojoules"), default="calories",
@@ -1573,8 +1636,6 @@ def build_parser() -> argparse.ArgumentParser:
                         f"that accepts the session)")
     p.add_argument("--mfp-base", default=MFP_ORIGIN, help=argparse.SUPPRESS)
     p.add_argument("--kv-launcher", default=KV_LAUNCHER, help=argparse.SUPPRESS)
-    p.add_argument("--print-state", action="store_true",
-                   help="show the recorded pushes and exit")
     p.add_argument("--dump-cookies", nargs="?", const="auto", metavar="SUFFIX,...",
                    help="list the cookies readable from this machine's browsers and exit "
                         "(default: the hosts this script uses)")
@@ -1613,14 +1674,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             else (KV_HOST_SUFFIX, "dietly.pl", MFP_HOST_SUFFIX)
         )
         dump_cookies(suffixes)
-        return 0
-
-    if args.print_state:
-        state = load_state()
-        if not state:
-            log("nothing recorded yet")
-        for key, when in sorted(state.items()):
-            log(f"{when}  {key}")
         return 0
 
     kv_recipe = SessionRecipe(
@@ -1698,19 +1751,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             + "'"
         )
 
-    state = {} if args.no_state else load_state()
-    pending = meals
-    already = []
-    if state and not args.force:
-        pending = []
-        for meal in meals:
-            if meal.fingerprint() in state:
-                already.append(meal)
-            else:
-                pending.append(meal)
-        if already:
-            log(f"{len(already)} meal(s) were already pushed by an earlier run (--force to re-send)")
+    if args.force:
+        pending, skipped = list(meals), []
+    else:
+        pending, skipped = split_already_logged(mfp, meals, mapping)
 
+    report_skipped(skipped)
     print_plan(pending, mapping)
     if not pending:
         log("everything is already in the diary")
@@ -1743,14 +1789,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             warn(f"{meal.day} {meal.meal_name}: MyFitnessPal rejected the entry: {exc}")
             continue
         written += 1
-        state[meal.fingerprint()] = datetime.now().isoformat(timespec="seconds")
         log(f"  + {meal.day} {meal.meal_name} -> {target}  "
             f"({round_half_up(meal.calories):.0f} kcal, "
             f"{meal.carbohydrates:.1f}g C / {meal.fat:.1f}g F / {meal.protein:.1f}g P)")
         time.sleep(0.3)
 
-    if not args.no_state:
-        save_state(state)
     log(f"\ndone: {written}/{len(pending)} entries written")
     return 0 if written == len(pending) else 1
 
