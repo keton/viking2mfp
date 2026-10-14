@@ -10,6 +10,10 @@ entry per meal into the matching meal slot.
 viking2mfp --from 2026-10-14 --to 2026-10-20
 ```
 
+## AI Disclosure
+
+Developed entirely by Deepseek 4.1 Flash under Oh My Pi harness. Manually tested up to 'works with my accounts' standard
+
 ## Install
 
 ```
